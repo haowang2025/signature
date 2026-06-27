@@ -53,7 +53,7 @@ public class MainActivity extends Activity {
             String status = intent.getStringExtra(Actions.EXTRA_STATUS);
             if (text != null && !text.isEmpty()) {
                 resultText.setText(text);
-            } else if (status != null) {
+            } else if (status != null && !status.isEmpty()) {
                 resultText.setText(status);
             }
             refreshHistory();
@@ -94,12 +94,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
         handleIntent(intent);
     }
 
     private void handleIntent(Intent intent) {
-        if (intent != null && Actions.ACTION_OPEN_VOICE_INPUT.equals(intent.getAction())) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        if (Actions.ACTION_OPEN_VOICE_INPUT.equals(action)) {
             voiceEdit.postDelayed(this::openVoiceInput, 250);
+        } else if (Actions.ACTION_CAPTURE_ONCE.equals(action)) {
+            resultText.postDelayed(this::captureOrAskAuthorization, 250);
         }
     }
 
@@ -110,9 +115,8 @@ public class MainActivity extends Activity {
         root.setPadding(dp(18), dp(20), dp(18), dp(24));
         scrollView.addView(root);
 
-        TextView title = text("给你看看", 26, true);
-        root.addView(title);
-        root.addView(text("一个主动分享式陪伴 App：短按把当前屏幕给 Ta 看一眼，长按把想说的话告诉 Ta。模型运行在你自己的 Mac / Ollama 上。", 14, false));
+        root.addView(text("给你看看", 26, true));
+        root.addView(text("主动分享式陪伴 App。短按把当前屏幕给 Ta 看一眼，长按把想说的话告诉 Ta。", 14, false));
 
         endpointEdit = edit("Ollama 地址，例如 http://127.0.0.1:11434", false);
         modelEdit = edit("模型，例如 gemma3:12b", false);
@@ -151,10 +155,7 @@ public class MainActivity extends Activity {
         Button coreButton = button("短按：给你看看｜长按：跟你说");
         coreButton.setTextSize(17);
         coreButton.setMinHeight(dp(64));
-        coreButton.setOnClickListener(v -> {
-            savePrefs();
-            sendServiceAction(Actions.ACTION_CAPTURE_ONCE);
-        });
+        coreButton.setOnClickListener(v -> captureOrAskAuthorization());
         coreButton.setOnLongClickListener(v -> {
             openVoiceInput();
             return true;
@@ -170,40 +171,37 @@ public class MainActivity extends Activity {
         sendTextButton.setOnClickListener(v -> sendUserText());
         root.addView(sendTextButton);
 
-        LinearLayout row2 = new LinearLayout(this);
-        row2.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout floatRow = new LinearLayout(this);
+        floatRow.setOrientation(LinearLayout.HORIZONTAL);
         Button showFloat = button("显示悬浮头像");
         Button hideFloat = button("隐藏悬浮头像");
         showFloat.setOnClickListener(v -> ensureOverlayThenShow());
         hideFloat.setOnClickListener(v -> sendServiceAction(Actions.ACTION_HIDE_FLOATING));
-        row2.addView(showFloat, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        row2.addView(hideFloat, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        root.addView(row2);
+        floatRow.addView(showFloat, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        floatRow.addView(hideFloat, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        root.addView(floatRow);
 
         root.addView(label("陪看模式（默认不建议一直开）"));
         root.addView(text("陪看模式会按间隔自动把屏幕分享给 Ta。更推荐用户想分享时手动短按。", 13, false));
         root.addView(label("间隔，秒"));
         root.addView(intervalEdit);
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER);
+        LinearLayout periodicRow = new LinearLayout(this);
+        periodicRow.setOrientation(LinearLayout.HORIZONTAL);
+        periodicRow.setGravity(Gravity.CENTER);
         Button startPeriodic = button("开始陪看");
         Button stopPeriodic = button("停止陪看");
-        startPeriodic.setOnClickListener(v -> {
-            savePrefs();
-            sendServiceAction(Actions.ACTION_START_PERIODIC);
-        });
+        startPeriodic.setOnClickListener(v -> startPeriodicOrAskAuthorization());
         stopPeriodic.setOnClickListener(v -> sendServiceAction(Actions.ACTION_STOP_PERIODIC));
-        row.addView(startPeriodic, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        row.addView(stopPeriodic, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        root.addView(row);
+        periodicRow.addView(startPeriodic, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        periodicRow.addView(stopPeriodic, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        root.addView(periodicRow);
 
         Button tileButton = button("添加快捷设置 Tile：给 Ta 看一眼");
         tileButton.setOnClickListener(v -> requestTile());
         root.addView(tileButton);
 
         root.addView(label("Ta 的回复"));
-        resultText = text("授权屏幕捕获后，短按“给你看看”开始。", 16, false);
+        resultText = text("第一次使用请先授权屏幕捕获。之后短按按钮即可分享当前屏幕。", 16, false);
         resultText.setPadding(0, dp(12), 0, dp(12));
         root.addView(resultText);
 
@@ -289,10 +287,40 @@ public class MainActivity extends Activity {
                 .apply();
     }
 
+    private boolean isCaptureReady() {
+        return getSharedPreferences(Actions.PREFS, MODE_PRIVATE)
+                .getBoolean(Actions.PREF_CAPTURE_READY, false);
+    }
+
+    private void captureOrAskAuthorization() {
+        savePrefs();
+        if (!isCaptureReady()) {
+            resultText.setText("还没有屏幕捕获授权。正在打开授权弹窗……");
+            requestScreenCapture();
+            return;
+        }
+        sendServiceAction(Actions.ACTION_CAPTURE_ONCE);
+        resultText.setText("已分享给 Ta，等待回复……");
+    }
+
+    private void startPeriodicOrAskAuthorization() {
+        savePrefs();
+        if (!isCaptureReady()) {
+            resultText.setText("陪看模式需要先授权屏幕捕获。正在打开授权弹窗……");
+            requestScreenCapture();
+            return;
+        }
+        sendServiceAction(Actions.ACTION_START_PERIODIC);
+    }
+
     private void requestScreenCapture() {
         savePrefs();
-        MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE);
+        try {
+            MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+            startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE);
+        } catch (Exception e) {
+            resultText.setText("无法打开屏幕捕获授权：" + e.getMessage());
+        }
     }
 
     @Override
@@ -304,9 +332,12 @@ public class MainActivity extends Activity {
                 i.setAction(Actions.ACTION_START_PROJECTION);
                 i.putExtra(Actions.EXTRA_RESULT_CODE, resultCode);
                 i.putExtra(Actions.EXTRA_RESULT_DATA, data);
-                startForegroundServiceCompat(i);
+                startProjectionServiceSafely(i);
                 resultText.setText("屏幕捕获已授权。现在可以短按“给你看看”，或打开悬浮头像。 ");
             } else {
+                getSharedPreferences(Actions.PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(Actions.PREF_CAPTURE_READY, false)
+                        .apply();
                 resultText.setText("你取消了屏幕捕获授权。 ");
             }
         }
@@ -323,7 +354,7 @@ public class MainActivity extends Activity {
         Intent i = new Intent(this, CaptureService.class);
         i.setAction(Actions.ACTION_SEND_TEXT);
         i.putExtra(Actions.EXTRA_USER_TEXT, text);
-        startForegroundServiceCompat(i);
+        startServiceSafely(i);
         voiceEdit.setText("");
         resultText.setText("已发给 Ta，等待回复……");
     }
@@ -331,14 +362,29 @@ public class MainActivity extends Activity {
     private void sendServiceAction(String action) {
         Intent i = new Intent(this, CaptureService.class);
         i.setAction(action);
-        startForegroundServiceCompat(i);
+        startServiceSafely(i);
     }
 
-    private void startForegroundServiceCompat(Intent i) {
-        if (Build.VERSION.SDK_INT >= 26) {
-            startForegroundService(i);
-        } else {
+    private void startProjectionServiceSafely(Intent i) {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
+        } catch (Exception e) {
+            resultText.setText("启动屏幕捕获服务失败：" + e.getMessage());
+            getSharedPreferences(Actions.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(Actions.PREF_CAPTURE_READY, false)
+                    .apply();
+        }
+    }
+
+    private void startServiceSafely(Intent i) {
+        try {
             startService(i);
+        } catch (Exception e) {
+            resultText.setText("启动服务失败：" + e.getMessage());
         }
     }
 
@@ -363,12 +409,16 @@ public class MainActivity extends Activity {
 
     private void requestTile() {
         if (Build.VERSION.SDK_INT >= 33) {
-            StatusBarManager sbm = getSystemService(StatusBarManager.class);
-            ComponentName cn = new ComponentName(this, CompanionTileService.class);
-            Executor executor = getMainExecutor();
-            sbm.requestAddTileService(cn, "给 Ta 看一眼", Icon.createWithResource(this, R.drawable.ic_tile), executor, result -> {
-                Toast.makeText(this, "Tile 请求结果：" + result, Toast.LENGTH_SHORT).show();
-            });
+            try {
+                StatusBarManager sbm = getSystemService(StatusBarManager.class);
+                ComponentName cn = new ComponentName(this, CompanionTileService.class);
+                Executor executor = getMainExecutor();
+                sbm.requestAddTileService(cn, "给 Ta 看一眼", Icon.createWithResource(this, R.drawable.ic_tile), executor, result -> {
+                    Toast.makeText(this, "Tile 请求结果：" + result, Toast.LENGTH_SHORT).show();
+                });
+            } catch (Exception e) {
+                Toast.makeText(this, "无法添加 Tile：" + e.getMessage(), Toast.LENGTH_LONG).show();
+            }
         } else {
             Toast.makeText(this, "请手动在快捷设置里添加“给 Ta 看一眼”Tile。", Toast.LENGTH_LONG).show();
         }
