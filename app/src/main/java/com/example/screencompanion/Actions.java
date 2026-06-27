@@ -28,6 +28,7 @@ public final class Actions {
     public static final String PREF_STYLE = "companion_style";
     public static final String PREF_SAVE_HISTORY = "save_history";
     public static final String PREF_SAVE_SCREENSHOTS = "save_screenshots";
+    public static final String PREF_CAPTURE_READY = "capture_ready";
 
     public static final String DEFAULT_ENDPOINT = "http://127.0.0.1:11434";
     public static final String DEFAULT_MODEL = "gemma3:12b";
