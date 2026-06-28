@@ -28,6 +28,7 @@ import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.TextView;
@@ -51,6 +52,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class CaptureService extends Service {
     private static final int NOTIFICATION_ID = 42;
     private static final String CHANNEL_ID = "screen_companion";
+    private static final long FLOATING_DOUBLE_TAP_MS = 420L;
 
     private Handler mainHandler;
     private HandlerThread captureThread;
@@ -74,6 +76,7 @@ public class CaptureService extends Service {
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private String lastReply = "";
     private boolean projectionForegroundStarted = false;
+    private long lastFloatingTapAt = 0L;
 
     private final MediaProjection.Callback projectionCallback = new MediaProjection.Callback() {
         @Override
@@ -180,7 +183,7 @@ public class CaptureService extends Service {
             mediaProjection.registerCallback(projectionCallback, captureHandler);
             setupVirtualDisplay();
             markCaptureReady(true);
-            updateNotification("屏幕捕获已授权", "短按“给你看看”即可分享当前屏幕。 ");
+            updateNotification("屏幕捕获已授权", "悬浮头像双击即可分享当前屏幕。 ");
             broadcastStatus("屏幕捕获已授权。", null);
         } catch (Exception e) {
             markCaptureReady(false);
@@ -486,21 +489,9 @@ public class CaptureService extends Service {
         }
         if (floatingButton != null) return;
         floatingButton = new Button(this);
-        floatingButton.setText("给Ta看");
+        floatingButton.setText("双击\n给Ta看");
         floatingButton.setAllCaps(false);
         floatingButton.setAlpha(0.86f);
-        floatingButton.setOnClickListener(v -> triggerCapture("floating"));
-        floatingButton.setOnLongClickListener(v -> {
-            Intent i = new Intent(this, MainActivity.class);
-            i.setAction(Actions.ACTION_OPEN_VOICE_INPUT);
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            try {
-                startActivity(i);
-            } catch (Exception e) {
-                broadcastStatus("无法打开输入界面：" + e.getMessage(), null);
-            }
-            return true;
-        });
         floatingParams = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -511,46 +502,93 @@ public class CaptureService extends Service {
         floatingParams.gravity = Gravity.TOP | Gravity.START;
         floatingParams.x = 40;
         floatingParams.y = 260;
-        attachDragBehavior(floatingButton, floatingParams);
+        attachFloatingTouchBehavior(floatingButton, floatingParams);
         try {
             windowManager.addView(floatingButton, floatingParams);
-            broadcastStatus("悬浮头像已显示。短按给 Ta 看，长按跟 Ta 说。", null);
+            broadcastStatus("悬浮头像已显示。双击给 Ta 看，长按跟 Ta 说，拖动只移动位置。", null);
         } catch (Exception e) {
             floatingButton = null;
             broadcastStatus("悬浮头像显示失败：" + e.getMessage(), null);
         }
     }
 
-    private void attachDragBehavior(View view, WindowManager.LayoutParams params) {
+    private void attachFloatingTouchBehavior(View view, WindowManager.LayoutParams params) {
         final float[] downRawX = new float[1];
         final float[] downRawY = new float[1];
         final int[] startX = new int[1];
         final int[] startY = new int[1];
+        final boolean[] dragging = new boolean[1];
+        final boolean[] longPressed = new boolean[1];
+        final int touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
+        final Runnable[] longPressRunnable = new Runnable[1];
+
         view.setOnTouchListener((v, event) -> {
-            switch (event.getAction()) {
+            switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     downRawX[0] = event.getRawX();
                     downRawY[0] = event.getRawY();
                     startX[0] = params.x;
                     startY[0] = params.y;
-                    return false;
+                    dragging[0] = false;
+                    longPressed[0] = false;
+                    longPressRunnable[0] = () -> {
+                        if (!dragging[0]) {
+                            longPressed[0] = true;
+                            lastFloatingTapAt = 0L;
+                            openVoiceInputFromFloating();
+                        }
+                    };
+                    mainHandler.postDelayed(longPressRunnable[0], ViewConfiguration.getLongPressTimeout());
+                    return true;
                 case MotionEvent.ACTION_MOVE:
                     int dx = Math.round(event.getRawX() - downRawX[0]);
                     int dy = Math.round(event.getRawY() - downRawY[0]);
-                    if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+                    if (Math.abs(dx) > touchSlop || Math.abs(dy) > touchSlop) {
+                        dragging[0] = true;
+                        if (longPressRunnable[0] != null) mainHandler.removeCallbacks(longPressRunnable[0]);
                         params.x = startX[0] + dx;
                         params.y = startY[0] + dy;
                         try {
                             if (floatingButton != null) windowManager.updateViewLayout(floatingButton, params);
                         } catch (Exception ignored) {
                         }
-                        return true;
                     }
-                    return false;
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    if (longPressRunnable[0] != null) mainHandler.removeCallbacks(longPressRunnable[0]);
+                    if (!dragging[0] && !longPressed[0]) {
+                        long now = System.currentTimeMillis();
+                        if (now - lastFloatingTapAt <= FLOATING_DOUBLE_TAP_MS) {
+                            lastFloatingTapAt = 0L;
+                            triggerCapture("floating-double-tap");
+                        } else {
+                            lastFloatingTapAt = now;
+                            broadcastStatus("再点一下，给 Ta 看当前屏幕。", null);
+                        }
+                    }
+                    dragging[0] = false;
+                    longPressed[0] = false;
+                    return true;
+                case MotionEvent.ACTION_CANCEL:
+                    if (longPressRunnable[0] != null) mainHandler.removeCallbacks(longPressRunnable[0]);
+                    dragging[0] = false;
+                    longPressed[0] = false;
+                    return true;
                 default:
-                    return false;
+                    return true;
             }
         });
+    }
+
+    private void openVoiceInputFromFloating() {
+        Intent i = new Intent(this, MainActivity.class);
+        i.setAction(Actions.ACTION_OPEN_VOICE_INPUT);
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        try {
+            startActivity(i);
+        } catch (Exception e) {
+            broadcastStatus("无法打开输入界面：" + e.getMessage(), null);
+        }
     }
 
     private void showReplyBubble(String text) {
