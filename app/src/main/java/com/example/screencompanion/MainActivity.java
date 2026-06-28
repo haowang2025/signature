@@ -18,6 +18,7 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.View;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -45,6 +46,13 @@ public class MainActivity extends Activity {
     private TextView resultText;
     private TextView historyText;
 
+    private LinearLayout mainSection;
+    private LinearLayout settingsSection;
+    private LinearLayout historySection;
+    private Button mainTab;
+    private Button settingsTab;
+    private Button historyTab;
+
     private final BroadcastReceiver resultReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -66,6 +74,7 @@ public class MainActivity extends Activity {
         buildUi();
         loadPrefs();
         refreshHistory();
+        showPage("main");
         requestNotificationPermissionIfNeeded();
         handleIntent(getIntent());
     }
@@ -102,8 +111,10 @@ public class MainActivity extends Activity {
         if (intent == null) return;
         String action = intent.getAction();
         if (Actions.ACTION_OPEN_VOICE_INPUT.equals(action)) {
+            showPage("main");
             voiceEdit.postDelayed(this::openVoiceInput, 250);
         } else if (Actions.ACTION_CAPTURE_ONCE.equals(action)) {
+            showPage("main");
             resultText.postDelayed(this::captureOrAskAuthorization, 250);
         }
     }
@@ -116,54 +127,62 @@ public class MainActivity extends Activity {
         scrollView.addView(root);
 
         root.addView(text("给你看看", 26, true));
-        root.addView(text("主动分享式陪伴 App。短按把当前屏幕给 Ta 看一眼，长按把想说的话告诉 Ta。", 14, false));
+        root.addView(text("短按把当前屏幕给 Ta 看；长按把想说的话告诉 Ta。", 14, false));
 
-        endpointEdit = edit("Ollama 地址，例如 http://127.0.0.1:11434", false);
-        modelEdit = edit("模型，例如 gemma3:12b", false);
-        intervalEdit = edit("陪看模式间隔秒数", false);
-        intervalEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
-        companionNameEdit = edit("陪伴对象名字，例如 小雨", false);
-        styleEdit = edit("关系风格，例如 温柔、亲近、轻微暧昧", true);
-        styleEdit.setMinLines(2);
-        promptEdit = edit("固定人设 Prompt", true);
-        promptEdit.setMinLines(8);
+        LinearLayout tabRow = new LinearLayout(this);
+        tabRow.setOrientation(LinearLayout.HORIZONTAL);
+        mainTab = button("主界面");
+        settingsTab = button("设置");
+        historyTab = button("记录");
+        mainTab.setOnClickListener(v -> showPage("main"));
+        settingsTab.setOnClickListener(v -> showPage("settings"));
+        historyTab.setOnClickListener(v -> {
+            refreshHistory();
+            showPage("history");
+        });
+        tabRow.addView(mainTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        tabRow.addView(settingsTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        tabRow.addView(historyTab, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        root.addView(tabRow);
 
-        root.addView(label("Ollama 地址"));
-        root.addView(endpointEdit);
-        root.addView(label("模型"));
-        root.addView(modelEdit);
-        root.addView(label("陪伴对象名字"));
-        root.addView(companionNameEdit);
-        root.addView(label("关系风格"));
-        root.addView(styleEdit);
-        root.addView(label("人设 Prompt"));
-        root.addView(promptEdit);
+        mainSection = section();
+        settingsSection = section();
+        historySection = section();
+        buildMainSection(mainSection);
+        buildSettingsSection(settingsSection);
+        buildHistorySection(historySection);
+        root.addView(mainSection);
+        root.addView(settingsSection);
+        root.addView(historySection);
 
-        saveHistoryCheck = new CheckBox(this);
-        saveHistoryCheck.setText("保存文字聊天记录");
-        saveHistoryCheck.setPadding(0, dp(12), 0, 0);
-        root.addView(saveHistoryCheck);
+        setContentView(scrollView);
+    }
 
-        saveScreenshotsCheck = new CheckBox(this);
-        saveScreenshotsCheck.setText("保存分享过的截图（默认关闭，涉及隐私）");
-        root.addView(saveScreenshotsCheck);
+    private LinearLayout section() {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(0, dp(8), 0, 0);
+        return layout;
+    }
 
-        Button grantButton = button("1. 授权屏幕捕获");
+    private void buildMainSection(LinearLayout root) {
+        Button grantButton = button("授权屏幕捕获");
         grantButton.setOnClickListener(v -> requestScreenCapture());
         root.addView(grantButton);
 
-        Button coreButton = button("短按：给你看看｜长按：跟你说");
-        coreButton.setTextSize(17);
-        coreButton.setMinHeight(dp(64));
+        Button coreButton = button("给你看看");
+        coreButton.setTextSize(22);
+        coreButton.setMinHeight(dp(86));
         coreButton.setOnClickListener(v -> captureOrAskAuthorization());
         coreButton.setOnLongClickListener(v -> {
             openVoiceInput();
             return true;
         });
         root.addView(coreButton);
+        root.addView(text("主按钮：短按分享当前屏幕，长按打开输入。悬浮头像：双击分享，长按输入，拖动只移动。", 13, false));
 
         root.addView(label("我想说"));
-        voiceEdit = edit("长按按钮后这里会获得焦点。可以点输入法麦克风，把语音转成文字。", true);
+        voiceEdit = edit("可以直接输入，也可以点输入法麦克风转文字。", true);
         voiceEdit.setMinLines(3);
         root.addView(voiceEdit);
 
@@ -181,10 +200,48 @@ public class MainActivity extends Activity {
         floatRow.addView(hideFloat, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         root.addView(floatRow);
 
-        root.addView(label("陪看模式（默认不建议一直开）"));
+        root.addView(label("Ta 的回复"));
+        resultText = text("第一次使用请先授权屏幕捕获。之后点“给你看看”即可分享当前屏幕。", 16, false);
+        resultText.setPadding(0, dp(12), 0, dp(12));
+        root.addView(resultText);
+    }
+
+    private void buildSettingsSection(LinearLayout root) {
+        endpointEdit = edit("Ollama 地址，例如 http://127.0.0.1:11434", false);
+        modelEdit = edit("模型，例如 gemma3:12b", false);
+        intervalEdit = edit("陪看模式间隔秒数", false);
+        intervalEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
+        companionNameEdit = edit("陪伴对象名字，例如 小雨", false);
+        styleEdit = edit("关系风格，例如 温柔、亲近、轻微暧昧", true);
+        styleEdit.setMinLines(2);
+        promptEdit = edit("固定人设 Prompt", true);
+        promptEdit.setMinLines(8);
+
+        addField(root, "Ollama 地址", endpointEdit);
+        addField(root, "模型", modelEdit);
+        addField(root, "陪伴对象名字", companionNameEdit);
+        addField(root, "关系风格", styleEdit);
+        addField(root, "人设 Prompt", promptEdit);
+
+        saveHistoryCheck = new CheckBox(this);
+        saveHistoryCheck.setText("保存文字聊天记录");
+        saveHistoryCheck.setPadding(0, dp(12), 0, 0);
+        root.addView(saveHistoryCheck);
+
+        saveScreenshotsCheck = new CheckBox(this);
+        saveScreenshotsCheck.setText("保存分享过的截图（默认关闭，涉及隐私）");
+        root.addView(saveScreenshotsCheck);
+
+        Button saveButton = button("保存设置");
+        saveButton.setOnClickListener(v -> {
+            savePrefs();
+            Toast.makeText(this, "设置已保存。", Toast.LENGTH_SHORT).show();
+            showPage("main");
+        });
+        root.addView(saveButton);
+
+        root.addView(label("陪看模式"));
         root.addView(text("陪看模式会按间隔自动把屏幕分享给 Ta。更推荐用户想分享时手动短按。", 13, false));
-        root.addView(label("间隔，秒"));
-        root.addView(intervalEdit);
         LinearLayout periodicRow = new LinearLayout(this);
         periodicRow.setOrientation(LinearLayout.HORIZONTAL);
         periodicRow.setGravity(Gravity.CENTER);
@@ -199,16 +256,17 @@ public class MainActivity extends Activity {
         Button tileButton = button("添加快捷设置 Tile：给 Ta 看一眼");
         tileButton.setOnClickListener(v -> requestTile());
         root.addView(tileButton);
+    }
 
-        root.addView(label("Ta 的回复"));
-        resultText = text("第一次使用请先授权屏幕捕获。之后短按按钮即可分享当前屏幕。", 16, false);
-        resultText.setPadding(0, dp(12), 0, dp(12));
-        root.addView(resultText);
-
+    private void buildHistorySection(LinearLayout root) {
         root.addView(label("最近聊天"));
         historyText = text("", 14, false);
         historyText.setPadding(dp(8), dp(8), dp(8), dp(8));
         root.addView(historyText);
+
+        Button refreshButton = button("刷新记录");
+        refreshButton.setOnClickListener(v -> refreshHistory());
+        root.addView(refreshButton);
 
         Button clearButton = button("清空聊天记录");
         clearButton.setOnClickListener(v -> {
@@ -217,8 +275,24 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "已清空文字聊天记录。", Toast.LENGTH_SHORT).show();
         });
         root.addView(clearButton);
+    }
 
-        setContentView(scrollView);
+    private void addField(LinearLayout root, String title, View field) {
+        root.addView(label(title));
+        root.addView(field);
+    }
+
+    private void showPage(String page) {
+        if (mainSection == null || settingsSection == null || historySection == null) return;
+        boolean main = "main".equals(page);
+        boolean settings = "settings".equals(page);
+        boolean history = "history".equals(page);
+        mainSection.setVisibility(main ? View.VISIBLE : View.GONE);
+        settingsSection.setVisibility(settings ? View.VISIBLE : View.GONE);
+        historySection.setVisibility(history ? View.VISIBLE : View.GONE);
+        mainTab.setEnabled(!main);
+        settingsTab.setEnabled(!settings);
+        historyTab.setEnabled(!history);
     }
 
     private TextView text(String s, int sp, boolean bold) {
@@ -306,6 +380,7 @@ public class MainActivity extends Activity {
     private void startPeriodicOrAskAuthorization() {
         savePrefs();
         if (!isCaptureReady()) {
+            showPage("main");
             resultText.setText("陪看模式需要先授权屏幕捕获。正在打开授权弹窗……");
             requestScreenCapture();
             return;
@@ -333,7 +408,7 @@ public class MainActivity extends Activity {
                 i.putExtra(Actions.EXTRA_RESULT_CODE, resultCode);
                 i.putExtra(Actions.EXTRA_RESULT_DATA, data);
                 startProjectionServiceSafely(i);
-                resultText.setText("屏幕捕获已授权。现在可以短按“给你看看”，或打开悬浮头像。 ");
+                resultText.setText("屏幕捕获已授权。现在可以点“给你看看”，或打开悬浮头像。 ");
             } else {
                 getSharedPreferences(Actions.PREFS, MODE_PRIVATE).edit()
                         .putBoolean(Actions.PREF_CAPTURE_READY, false)
@@ -400,6 +475,7 @@ public class MainActivity extends Activity {
     }
 
     private void openVoiceInput() {
+        showPage("main");
         voiceEdit.requestFocus();
         voiceEdit.setSelection(voiceEdit.getText().length());
         InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
