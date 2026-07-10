@@ -2,6 +2,7 @@ package com.example.screencompanion;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.StatusBarManager;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -28,7 +29,19 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int REQ_CAPTURE = 1001;
@@ -45,6 +58,7 @@ public class MainActivity extends Activity {
     private CheckBox saveScreenshotsCheck;
     private TextView resultText;
     private TextView historyText;
+    private TextView storageText;
 
     private LinearLayout mainSection;
     private LinearLayout settingsSection;
@@ -52,6 +66,7 @@ public class MainActivity extends Activity {
     private Button mainTab;
     private Button settingsTab;
     private Button historyTab;
+    private final ExecutorService diagnosticsExecutor = Executors.newSingleThreadExecutor();
 
     private final BroadcastReceiver resultReceiver = new BroadcastReceiver() {
         @Override
@@ -98,6 +113,12 @@ public class MainActivity extends Activity {
         } catch (IllegalArgumentException ignored) {
         }
         savePrefs();
+    }
+
+    @Override
+    protected void onDestroy() {
+        diagnosticsExecutor.shutdownNow();
+        super.onDestroy();
     }
 
     @Override
@@ -219,9 +240,15 @@ public class MainActivity extends Activity {
 
         addField(root, "Ollama 地址", endpointEdit);
         addField(root, "模型", modelEdit);
+        addField(root, "陪看间隔（秒，最低 15 秒）", intervalEdit);
         addField(root, "陪伴对象名字", companionNameEdit);
         addField(root, "关系风格", styleEdit);
         addField(root, "人设 Prompt", promptEdit);
+
+        Button testConnectionButton = button("测试 Ollama 连接");
+        testConnectionButton.setOnClickListener(v -> testOllamaConnection(testConnectionButton));
+        root.addView(testConnectionButton);
+        root.addView(text("本机回环地址最安全。使用局域网明文 HTTP 时，请确保网络可信。", 12, false));
 
         saveHistoryCheck = new CheckBox(this);
         saveHistoryCheck.setText("保存文字聊天记录");
@@ -235,8 +262,16 @@ public class MainActivity extends Activity {
         Button saveButton = button("保存设置");
         saveButton.setOnClickListener(v -> {
             savePrefs();
-            Toast.makeText(this, "设置已保存。", Toast.LENGTH_SHORT).show();
-            showPage("main");
+            if (isPotentiallyUnsafeEndpoint(endpointEdit.getText().toString().trim())) {
+                new AlertDialog.Builder(this)
+                        .setTitle("明文连接提醒")
+                        .setMessage("当前地址不是本机回环地址，截图和聊天内容可能通过明文 HTTP 发送。请只在可信局域网中使用，或通过 SSH 隧道连接 127.0.0.1。")
+                        .setPositiveButton("我知道了", (dialog, which) -> showPage("main"))
+                        .show();
+            } else {
+                Toast.makeText(this, "设置已保存。", Toast.LENGTH_SHORT).show();
+                showPage("main");
+            }
         });
         root.addView(saveButton);
 
@@ -264,17 +299,24 @@ public class MainActivity extends Activity {
         historyText.setPadding(dp(8), dp(8), dp(8), dp(8));
         root.addView(historyText);
 
+        storageText = text("", 12, false);
+        root.addView(storageText);
+
         Button refreshButton = button("刷新记录");
         refreshButton.setOnClickListener(v -> refreshHistory());
         root.addView(refreshButton);
 
-        Button clearButton = button("清空聊天记录");
-        clearButton.setOnClickListener(v -> {
-            ChatStore.clear(this);
-            refreshHistory();
-            Toast.makeText(this, "已清空文字聊天记录。", Toast.LENGTH_SHORT).show();
-        });
-        root.addView(clearButton);
+        Button clearHistoryButton = button("清空文字聊天记录");
+        clearHistoryButton.setOnClickListener(v -> confirmClearHistory());
+        root.addView(clearHistoryButton);
+
+        Button clearScreenshotsButton = button("清空已保存截图");
+        clearScreenshotsButton.setOnClickListener(v -> confirmClearScreenshots());
+        root.addView(clearScreenshotsButton);
+
+        Button clearAllButton = button("清空全部本地数据");
+        clearAllButton.setOnClickListener(v -> confirmClearAll());
+        root.addView(clearAllButton);
     }
 
     private void addField(LinearLayout root, String title, View field) {
@@ -346,9 +388,10 @@ public class MainActivity extends Activity {
     private void savePrefs() {
         int interval = Actions.DEFAULT_INTERVAL_SECONDS;
         try {
-            interval = Math.max(5, Integer.parseInt(intervalEdit.getText().toString().trim()));
+            interval = Math.max(15, Integer.parseInt(intervalEdit.getText().toString().trim()));
         } catch (Exception ignored) {
         }
+        intervalEdit.setText(String.valueOf(interval));
         getSharedPreferences(Actions.PREFS, MODE_PRIVATE).edit()
                 .putString(Actions.PREF_ENDPOINT, endpointEdit.getText().toString().trim())
                 .putString(Actions.PREF_MODEL, modelEdit.getText().toString().trim())
@@ -508,5 +551,123 @@ public class MainActivity extends Activity {
 
     private void refreshHistory() {
         if (historyText != null) historyText.setText(ChatStore.renderForUi(this, 30));
+        if (storageText != null) {
+            int count = ChatStore.screenshotCount(this);
+            storageText.setText("已保存截图：" + count + " 张，占用 " + formatBytes(ChatStore.screenshotBytes(this)) + "。聊天历史最多保留 1000 条。");
+        }
+    }
+
+    private void confirmClearHistory() {
+        new AlertDialog.Builder(this)
+                .setTitle("清空文字聊天记录？")
+                .setMessage("此操作不会删除已保存截图。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清空", (dialog, which) -> {
+                    boolean ok = ChatStore.clearHistory(this);
+                    refreshHistory();
+                    Toast.makeText(this, ok ? "已清空文字聊天记录。" : "部分记录删除失败。", Toast.LENGTH_SHORT).show();
+                })
+                .show();
+    }
+
+    private void confirmClearScreenshots() {
+        int count = ChatStore.screenshotCount(this);
+        new AlertDialog.Builder(this)
+                .setTitle("清空已保存截图？")
+                .setMessage("将删除 " + count + " 张截图，此操作无法撤销。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("删除", (dialog, which) -> {
+                    boolean ok = ChatStore.clearScreenshots(this);
+                    refreshHistory();
+                    Toast.makeText(this, ok ? "已清空保存的截图。" : "部分截图删除失败。", Toast.LENGTH_SHORT).show();
+                })
+                .show();
+    }
+
+    private void confirmClearAll() {
+        int count = ChatStore.screenshotCount(this);
+        new AlertDialog.Builder(this)
+                .setTitle("清空全部本地数据？")
+                .setMessage("将删除文字聊天记录和 " + count + " 张截图。此操作无法撤销。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("全部删除", (dialog, which) -> {
+                    boolean ok = ChatStore.clearAll(this);
+                    refreshHistory();
+                    Toast.makeText(this, ok ? "已清空全部本地数据。" : "部分数据删除失败。", Toast.LENGTH_SHORT).show();
+                })
+                .show();
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024L * 1024L) return String.format(Locale.US, "%.1f KB", bytes / 1024.0);
+        return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
+    }
+
+    private void testOllamaConnection(Button button) {
+        savePrefs();
+        String endpoint = endpointEdit.getText().toString().trim();
+        button.setEnabled(false);
+        button.setText("正在测试……");
+        diagnosticsExecutor.execute(() -> {
+            String message;
+            try {
+                URL url = new URL(normalizeTagsUrl(endpoint));
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(10000);
+                int code = conn.getResponseCode();
+                InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+                String body = readLimited(stream, 64 * 1024);
+                if (code < 200 || code >= 300) {
+                    throw new IllegalStateException("HTTP " + code + (body.isEmpty() ? "" : "：" + body));
+                }
+                JSONObject response = new JSONObject(body);
+                int modelCount = response.optJSONArray("models") == null ? 0 : response.optJSONArray("models").length();
+                message = "连接成功，检测到 " + modelCount + " 个本地模型。";
+            } catch (Exception e) {
+                message = "连接失败：" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            }
+            String finalMessage = message;
+            runOnUiThread(() -> {
+                button.setEnabled(true);
+                button.setText("测试 Ollama 连接");
+                Toast.makeText(this, finalMessage, Toast.LENGTH_LONG).show();
+            });
+        });
+    }
+
+    private String normalizeTagsUrl(String endpoint) {
+        String e = endpoint == null || endpoint.trim().isEmpty() ? Actions.DEFAULT_ENDPOINT : endpoint.trim();
+        while (e.endsWith("/")) e = e.substring(0, e.length() - 1);
+        if (e.endsWith("/api/generate")) e = e.substring(0, e.length() - "/api/generate".length());
+        return e + "/api/tags";
+    }
+
+    private String readLimited(InputStream input, int maxChars) throws Exception {
+        if (input == null) return "";
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
+            char[] buffer = new char[2048];
+            int read;
+            while ((read = reader.read(buffer)) != -1 && sb.length() < maxChars) {
+                int allowed = Math.min(read, maxChars - sb.length());
+                sb.append(buffer, 0, allowed);
+            }
+        }
+        return sb.toString();
+    }
+
+    private boolean isPotentiallyUnsafeEndpoint(String endpoint) {
+        try {
+            URI uri = new URI(endpoint);
+            if (!"http".equalsIgnoreCase(uri.getScheme())) return false;
+            String host = uri.getHost();
+            if (host == null) return true;
+            return !("localhost".equalsIgnoreCase(host) || "127.0.0.1".equals(host) || "::1".equals(host));
+        } catch (Exception e) {
+            return true;
+        }
     }
 }
