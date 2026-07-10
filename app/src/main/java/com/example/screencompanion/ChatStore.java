@@ -1,6 +1,7 @@
 package com.example.screencompanion;
 
 import android.content.Context;
+import android.util.Log;
 
 import org.json.JSONObject;
 
@@ -18,8 +19,10 @@ import java.util.List;
 import java.util.Locale;
 
 public final class ChatStore {
+    private static final String TAG = "ChatStore";
     private static final String CHAT_FILE = "chat_history.jsonl";
     private static final String SCREENSHOT_DIR = "shared_screens";
+    private static final int MAX_HISTORY_LINES = 1000;
 
     private ChatStore() {}
 
@@ -29,12 +32,17 @@ public final class ChatStore {
 
     public static File screenshotDir(Context context) {
         File dir = new File(context.getFilesDir(), SCREENSHOT_DIR);
-        if (!dir.exists()) dir.mkdirs();
+        if (!dir.exists() && !dir.mkdirs()) {
+            Log.w(TAG, "Unable to create screenshot directory: " + dir.getAbsolutePath());
+        }
         return dir;
     }
 
     public static String saveScreenshot(Context context, byte[] jpegBytes) throws Exception {
         File dir = screenshotDir(context);
+        if (!dir.exists() || !dir.isDirectory()) {
+            throw new IllegalStateException("截图目录不可用");
+        }
         String name = "screen_" + System.currentTimeMillis() + ".jpg";
         File file = new File(dir, name);
         try (FileOutputStream out = new FileOutputStream(file)) {
@@ -57,7 +65,36 @@ public final class ChatStore {
                 writer.write(obj.toString());
                 writer.write("\n");
             }
-        } catch (Exception ignored) {
+            trimHistoryIfNeeded(context);
+        } catch (Exception e) {
+            Log.e(TAG, "Unable to append chat history", e);
+        }
+    }
+
+    private static void trimHistoryIfNeeded(Context context) {
+        List<String> lines = new ArrayList<>();
+        File file = historyFile(context);
+        if (!file.exists()) return;
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.trim().isEmpty()) lines.add(line);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Unable to inspect chat history size", e);
+            return;
+        }
+
+        if (lines.size() <= MAX_HISTORY_LINES) return;
+        int start = lines.size() - MAX_HISTORY_LINES;
+        try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(file, false), StandardCharsets.UTF_8)) {
+            for (int i = start; i < lines.size(); i++) {
+                writer.write(lines.get(i));
+                writer.write("\n");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Unable to trim chat history", e);
         }
     }
 
@@ -72,10 +109,12 @@ public final class ChatStore {
                 if (line.isEmpty()) continue;
                 try {
                     result.add(new JSONObject(line));
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    Log.w(TAG, "Skipping malformed chat history line", e);
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            Log.e(TAG, "Unable to read chat history", e);
         }
         return result;
     }
@@ -99,7 +138,7 @@ public final class ChatStore {
             if ("user".equals(role)) {
                 sb.append("用户：");
                 if ("screenshot".equals(type)) {
-                    sb.append(text == null || text.isEmpty() ? "分享了一张屏幕。" : text);
+                    sb.append(text.isEmpty() ? "分享了一张屏幕。" : text);
                 } else {
                     sb.append(text);
                 }
@@ -122,7 +161,7 @@ public final class ChatStore {
             if (JSONObject.NULL.toString().equals(text)) text = "";
             if ("user".equals(role)) {
                 sb.append("我：");
-                if ("screenshot".equals(type)) sb.append(text == null || text.isEmpty() ? "给你看看了当前屏幕" : text);
+                if ("screenshot".equals(type)) sb.append(text.isEmpty() ? "给你看看了当前屏幕" : text);
                 else sb.append(text);
             } else {
                 sb.append("Ta：").append(text);
@@ -132,9 +171,48 @@ public final class ChatStore {
         return sb.toString().trim();
     }
 
-    public static synchronized void clear(Context context) {
+    public static synchronized boolean clearHistory(Context context) {
         File file = historyFile(context);
-        if (file.exists()) file.delete();
+        return !file.exists() || file.delete();
+    }
+
+    public static synchronized int screenshotCount(Context context) {
+        File[] files = screenshotDir(context).listFiles();
+        return files == null ? 0 : files.length;
+    }
+
+    public static synchronized long screenshotBytes(Context context) {
+        File[] files = screenshotDir(context).listFiles();
+        if (files == null) return 0L;
+        long total = 0L;
+        for (File file : files) {
+            if (file.isFile()) total += file.length();
+        }
+        return total;
+    }
+
+    public static synchronized boolean clearScreenshots(Context context) {
+        File dir = screenshotDir(context);
+        File[] files = dir.listFiles();
+        boolean success = true;
+        if (files != null) {
+            for (File file : files) {
+                if (file.isFile() && !file.delete()) {
+                    success = false;
+                    Log.w(TAG, "Unable to delete screenshot: " + file.getAbsolutePath());
+                }
+            }
+        }
+        return success;
+    }
+
+    public static synchronized boolean clearAll(Context context) {
+        return clearHistory(context) & clearScreenshots(context);
+    }
+
+    @Deprecated
+    public static synchronized void clear(Context context) {
+        clearHistory(context);
     }
 
     private static String nowIsoLike() {
